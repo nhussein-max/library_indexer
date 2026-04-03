@@ -11,6 +11,23 @@ import os
 import random
 import sys
 
+# Set LLVM library path for Mitsuba before importing it
+# Check if current path is valid, if not find a valid one
+current_llvm_path = os.environ.get("DRJIT_LIBLLVM_PATH")
+if current_llvm_path is None or not os.path.exists(current_llvm_path):
+    # Try common LLVM library locations
+    llvm_paths = [
+        "/usr/lib/llvm-17/lib/libLLVM.so",
+        "/usr/lib/llvm-18/lib/libLLVM.so",
+        "/usr/lib/llvm-14/lib/libLLVM.so",
+        "/usr/lib/x86_64-linux-gnu/libLLVM-17.so",
+        "/usr/lib/x86_64-linux-gnu/libLLVM-18.so",
+    ]
+    for llvm_path in llvm_paths:
+        if os.path.exists(llvm_path):
+            os.environ["DRJIT_LIBLLVM_PATH"] = llvm_path
+            break
+
 import mitsuba as mi
 import numpy as np
 
@@ -253,6 +270,222 @@ def create_book_scene(
     return scene_dict
 
 
+def create_bookshelf_scene(
+    books: list,
+    shelf_width: float = 100.0,
+    shelf_depth: float = 25.0,
+    image_width: int = 1024,
+    image_height: int = 512,
+    sample_count: int = 128,
+    zoom: float = 1.0,
+) -> dict:
+    """
+    Create a Mitsuba scene dictionary for a bookshelf with multiple books.
+
+    Args:
+        books: List of book dictionaries, each containing:
+            - height: Book height in cm
+            - width: Book width in cm (spine to page edge)
+            - depth: Book thickness in cm
+            - cover_color: RGB tuple for cover color
+            - spine_color: RGB tuple for spine (optional)
+            - page_color: RGB tuple for page edges (optional)
+            - rotation: Rotation around Y axis in degrees (optional, default 0)
+            - lean: Lean angle in degrees, positive = leaning right (optional, default 0)
+        shelf_width: Width of the shelf in cm
+        shelf_depth: Depth of the shelf in cm
+        image_width: Output image width in pixels
+        image_height: Output image height in pixels
+        sample_count: Number of samples per pixel for rendering
+        zoom: Zoom factor for the camera
+
+    Returns:
+        A Mitsuba scene dictionary
+    """
+    scene_objects = {
+        "type": "scene",
+        "integrator": {
+            "type": "path",
+            "max_depth": 8,
+        },
+        # Camera setup - positioned in FRONT of the shelf looking at the spines
+        # Camera is at positive Z looking toward negative Z (toward the back of the shelf)
+        # Books are arranged along X axis with spines facing +Z (toward camera)
+        "sensor": {
+            "type": "perspective",
+            "fov": 50,
+            "to_world": mi.ScalarTransform4f.look_at(
+                origin=[shelf_width * 0.5, 25, shelf_depth * 4.0],  # Further back to see all books
+                target=[shelf_width * 0.5, 12, 0],  # Looking at center of shelf
+                up=[0, 1, 0],
+            ),
+            "sampler": {
+                "type": "independent",
+                "sample_count": sample_count,
+            },
+            "film": {
+                "type": "hdrfilm",
+                "width": image_width,
+                "height": image_height,
+                "rfilter": {"type": "gaussian"},
+            },
+        },
+        # Environment lighting - soft ambient light
+        "emitter_env": {
+            "type": "constant",
+            "radiance": {"type": "rgb", "value": [0.4, 0.4, 0.45]},
+        },
+        # Main directional light from front (toward the spines)
+        "emitter_main": {
+            "type": "directional",
+            "direction": [0, -0.5, -1.0],  # Light from front going back
+            "irradiance": {"type": "rgb", "value": [3.0, 2.9, 2.7]},
+        },
+        # Fill light from above
+        "emitter_fill": {
+            "type": "directional",
+            "direction": [0.3, -1.0, -0.3],
+            "irradiance": {"type": "rgb", "value": [1.0, 1.0, 1.0]},
+        },
+        # The shelf board
+        "shelf_board": {
+            "type": "cube",
+            "to_world": mi.ScalarTransform4f.translate([shelf_width / 2, -1, 0])
+            @ mi.ScalarTransform4f.scale([shelf_width / 2, 1, shelf_depth / 2]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {
+                    "type": "rgb",
+                    "value": [0.4, 0.25, 0.15],  # Wood color
+                },
+            },
+        },
+        # Back panel of the bookshelf
+        "shelf_back": {
+            "type": "cube",
+            "to_world": mi.ScalarTransform4f.translate([shelf_width / 2, shelf_width * 0.3, -shelf_depth / 2 - 1])
+            @ mi.ScalarTransform4f.scale([shelf_width / 2, shelf_width * 0.3, 1]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {
+                    "type": "rgb",
+                    "value": [0.35, 0.22, 0.13],  # Slightly darker wood
+                },
+            },
+        },
+    }
+
+    # Calculate starting position for books (left side of shelf)
+    current_x = 2.0  # Start with a small margin from the left
+
+    for i, book in enumerate(books):
+        height = book.get("height", 25.0)
+        width = book.get("width", 18.0)  # Spine to page edge (depth into shelf)
+        depth = book.get("depth", 4.0)   # Thickness of the book (along shelf)
+        cover_color = book.get("cover_color", (0.6, 0.1, 0.1))
+        spine_color = book.get("spine_color")
+        page_color = book.get("page_color", (0.95, 0.92, 0.85))
+
+        if spine_color is None:
+            spine_color = tuple(max(0, c * 0.7) for c in cover_color)
+
+        # Book dimensions (no rotation needed - books stand upright with spines facing +Z)
+        # X axis: along the shelf (thickness of book)
+        # Y axis: height of book
+        # Z axis: depth into shelf (spine at +Z, pages at -Z)
+        book_scale_x = depth / 2.0   # Half thickness
+        book_scale_y = height / 2.0  # Half height
+        book_scale_z = width / 2.0   # Half depth (spine to pages)
+
+        # Calculate book position - books side by side along X axis
+        book_x = current_x + book_scale_x
+
+        # Simple upright transform - no rotation, spines face +Z (toward camera)
+        base_transform = mi.ScalarTransform4f.translate([book_x, book_scale_y, 0])
+
+        # Add book objects to scene with unique names
+        prefix = f"book_{i:03d}_"
+
+        # Main book body (the cover)
+        scene_objects[f"{prefix}body"] = {
+            "type": "cube",
+            "to_world": base_transform
+            @ mi.ScalarTransform4f.scale([book_scale_x, book_scale_y, book_scale_z]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {
+                    "type": "rgb",
+                    "value": list(cover_color),
+                },
+            },
+        }
+
+        # Spine - facing +Z toward the camera
+        scene_objects[f"{prefix}spine"] = {
+            "type": "cube",
+            "to_world": base_transform
+            @ mi.ScalarTransform4f.translate([0, 0, book_scale_z + 0.02])
+            @ mi.ScalarTransform4f.scale([book_scale_x * 0.96, book_scale_y * 0.98, 0.1]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {
+                    "type": "rgb",
+                    "value": list(spine_color),
+                },
+            },
+        }
+
+        # Page edges on the back side (-Z, against the back of shelf)
+        scene_objects[f"{prefix}page_edges"] = {
+            "type": "cube",
+            "to_world": base_transform
+            @ mi.ScalarTransform4f.translate([0, 0, -book_scale_z + 0.2])
+            @ mi.ScalarTransform4f.scale([book_scale_x * 0.9, book_scale_y * 0.96, 0.15]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {
+                    "type": "rgb",
+                    "value": list(page_color),
+                },
+            },
+        }
+
+        # Top page edge
+        scene_objects[f"{prefix}page_edges_top"] = {
+            "type": "cube",
+            "to_world": base_transform
+            @ mi.ScalarTransform4f.translate([0, book_scale_y - 0.1, 0])
+            @ mi.ScalarTransform4f.scale([book_scale_x * 0.9, 0.1, book_scale_z * 0.9]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {
+                    "type": "rgb",
+                    "value": list(page_color),
+                },
+            },
+        }
+
+        # Decorative title band on the spine
+        scene_objects[f"{prefix}title_band"] = {
+            "type": "cube",
+            "to_world": base_transform
+            @ mi.ScalarTransform4f.translate([0, height * 0.1, book_scale_z + 0.06])
+            @ mi.ScalarTransform4f.scale([book_scale_x * 0.7, height * 0.2, 0.08]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {
+                    "type": "rgb",
+                    "value": [min(1.0, c * 1.2) for c in spine_color],
+                },
+            },
+        }
+
+        # Update current_x for next book - add small gap for realism
+        current_x += depth + 0.2
+
+    return scene_objects
+
+
 def render_book(
     height: float,
     width: float,
@@ -342,6 +575,148 @@ def render_book(
     bitmap.write(output_path)
 
     print(f"Saved rendered image to: {output_path}")
+
+
+def render_bookshelf(
+    books: list,
+    output_path: str,
+    shelf_width: float = 100.0,
+    shelf_depth: float = 25.0,
+    image_width: int = 1024,
+    image_height: int = 512,
+    zoom: float = 1.0,
+) -> None:
+    """
+    Render a bookshelf with multiple books side by side.
+
+    Args:
+        books: List of book dictionaries with book properties
+        output_path: Path to save the rendered image
+        shelf_width: Width of the shelf in cm
+        shelf_depth: Depth of the shelf in cm
+        image_width: Output image width
+        image_height: Output image height
+        zoom: Zoom factor for the camera
+    """
+    print(f"Generating bookshelf with {len(books)} books")
+    print(f"Shelf dimensions: {shelf_width:.1f}cm x {shelf_depth:.1f}cm")
+
+    scene_dict = create_bookshelf_scene(
+        books=books,
+        shelf_width=shelf_width,
+        shelf_depth=shelf_depth,
+        image_width=image_width,
+        image_height=image_height,
+        zoom=zoom,
+    )
+
+    # Load and render the scene
+    scene = mi.load_dict(scene_dict)
+    image = mi.render(scene)
+
+    # Convert to 8-bit and save as PNG
+    bitmap = mi.Bitmap(image)
+    bitmap = bitmap.convert(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.UInt8)
+    bitmap.write(output_path)
+
+    print(f"Saved rendered image to: {output_path}")
+
+
+def generate_random_bookshelf(
+    num_books: int = 12,
+    output_path: str = "bookshelf.png",
+    shelf_width: float = 100.0,
+    shelf_depth: float = 25.0,
+    seed: int = None,
+) -> None:
+    """
+    Generate a bookshelf with randomly generated books.
+
+    Args:
+        num_books: Number of books to place on the shelf
+        output_path: Path to save the rendered image
+        shelf_width: Width of the shelf in cm
+        shelf_depth: Depth of the shelf in cm
+        seed: Random seed for reproducibility
+    """
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    books = []
+
+    # Generate random books
+    for i in range(num_books):
+        # Generate realistic book dimensions
+        height = random.uniform(18.0, 28.0)
+        width = random.uniform(12.0, 22.0)
+        depth = random.uniform(1.5, 6.0)
+
+        # Generate a pleasant random book cover color
+        hue_type = random.choice(["red", "blue", "green", "brown", "purple", "orange", "teal"])
+        if hue_type == "red":
+            cover_color = (
+                random.uniform(0.5, 0.8),
+                random.uniform(0.05, 0.15),
+                random.uniform(0.05, 0.15),
+            )
+        elif hue_type == "blue":
+            cover_color = (
+                random.uniform(0.05, 0.2),
+                random.uniform(0.2, 0.5),
+                random.uniform(0.5, 0.8),
+            )
+        elif hue_type == "green":
+            cover_color = (
+                random.uniform(0.05, 0.2),
+                random.uniform(0.4, 0.7),
+                random.uniform(0.1, 0.3),
+            )
+        elif hue_type == "brown":
+            cover_color = (
+                random.uniform(0.4, 0.6),
+                random.uniform(0.25, 0.4),
+                random.uniform(0.1, 0.2),
+            )
+        elif hue_type == "purple":
+            cover_color = (
+                random.uniform(0.4, 0.7),
+                random.uniform(0.1, 0.25),
+                random.uniform(0.5, 0.8),
+            )
+        elif hue_type == "orange":
+            cover_color = (
+                random.uniform(0.7, 0.9),
+                random.uniform(0.4, 0.6),
+                random.uniform(0.05, 0.15),
+            )
+        else:  # teal
+            cover_color = (
+                random.uniform(0.05, 0.2),
+                random.uniform(0.5, 0.7),
+                random.uniform(0.5, 0.7),
+            )
+
+        # Occasional lean for visual interest (some books lean on neighbors)
+        lean = 0.0
+        if i > 0 and random.random() < 0.15:
+            lean = random.uniform(5.0, 15.0) * random.choice([-1, 1])
+
+        book = {
+            "height": height,
+            "width": width,
+            "depth": depth,
+            "cover_color": cover_color,
+            "lean": lean,
+        }
+        books.append(book)
+
+    render_bookshelf(
+        books=books,
+        output_path=output_path,
+        shelf_width=shelf_width,
+        shelf_depth=shelf_depth,
+    )
 
 
 def generate_random_books(
@@ -485,6 +860,23 @@ def main():
         help="Zoom factor for the camera. Values < 1 zoom in (closer view), "
              "values > 1 zoom out (wider view). Default is 1.0.",
     )
+    parser.add_argument(
+        "--bookshelf",
+        action="store_true",
+        help="Generate a bookshelf with multiple books side by side instead of individual books",
+    )
+    parser.add_argument(
+        "--shelf-width",
+        type=float,
+        default=100.0,
+        help="Width of the bookshelf in cm (default: 100)",
+    )
+    parser.add_argument(
+        "--shelf-depth",
+        type=float,
+        default=25.0,
+        help="Depth of the bookshelf in cm (default: 25)",
+    )
 
     args = parser.parse_args()
 
@@ -511,7 +903,19 @@ def main():
             print("Error: --rotation-range must be two comma-separated values (e.g., '-30,30')")
             sys.exit(1)
 
-    if args.num_books == 1 and args.height is not None and args.width is not None and args.depth is not None:
+    if args.bookshelf:
+        # Generate bookshelf with multiple books side by side
+        if args.seed is not None:
+            random.seed(args.seed)
+            np.random.seed(args.seed)
+        generate_random_bookshelf(
+            num_books=args.num_books,
+            output_path=args.output,
+            shelf_width=args.shelf_width,
+            shelf_depth=args.shelf_depth,
+            seed=args.seed,
+        )
+    elif args.num_books == 1 and args.height is not None and args.width is not None and args.depth is not None:
         # Single book with specified dimensions
         render_book(
             height=args.height,
@@ -544,7 +948,7 @@ def main():
             zoom=args.zoom,
         )
     else:
-        # Multiple books with random dimensions
+        # Multiple books with random dimensions (individual renders)
         generate_random_books(
             num_books=args.num_books,
             output_dir=args.output_dir,
@@ -556,3 +960,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
