@@ -92,10 +92,6 @@ def create_book_scene(
     page_strip_width = 0.3  # cm
     page_strip_depth = depth * 0.95  # Slightly inset
 
-    # Build the book's rotation transform around the Y axis
-    # This is applied to all book parts so they rotate together
-    book_rotation = mi.ScalarTransform4f.rotate([0, 1, 0], rotation)
-
     # Camera positioning:
     # Default: spine faces the camera (spine is on negative X side of the book)
     # The base camera position is from the left side (negative X) looking at the book
@@ -104,9 +100,20 @@ def create_book_scene(
     base_camera_distance_z = depth * 2.0
     base_camera_height = height * 0.8
 
-    camera_x = -base_camera_distance_x * zoom  # Negative X = facing the spine
+    # Calculate camera position with rotation (orbit around the book)
+    # Convert rotation to radians for trig calculations
+    rotation_rad = np.radians(rotation)
+    cos_rot = np.cos(rotation_rad)
+    sin_rot = np.sin(rotation_rad)
+
+    # Default camera position (at rotation=0): facing the spine from negative X
+    base_x = -base_camera_distance_x
+    base_z = base_camera_distance_z
+
+    # Rotate camera position around Y axis
+    camera_x = (base_x * cos_rot - base_z * sin_rot) * zoom
     camera_y = base_camera_height
-    camera_z = base_camera_distance_z * zoom
+    camera_z = (base_x * sin_rot + base_z * cos_rot) * zoom
 
     # Camera target - look at the center of the book
     target_y = height * 0.3
@@ -156,11 +163,9 @@ def create_book_scene(
             "irradiance": {"type": "rgb", "value": [1.0, 1.0, 1.2]},
         },
         # Main book body (the covers and pages as one block)
-        # Rotation is applied so the book can be turned to show different sides
         "book_body": {
             "type": "cube",
-            "to_world": book_rotation
-            @ mi.ScalarTransform4f.translate([0, book_scale_y, 0])
+            "to_world": mi.ScalarTransform4f.translate([0, book_scale_y, 0])
             @ mi.ScalarTransform4f.scale([book_scale_x, book_scale_y, book_scale_z]),
             "bsdf": {
                 "type": "diffuse",
@@ -173,8 +178,7 @@ def create_book_scene(
         # Spine detail - a slightly different colored strip on the left
         "spine": {
             "type": "cube",
-            "to_world": book_rotation
-            @ mi.ScalarTransform4f.translate(
+            "to_world": mi.ScalarTransform4f.translate(
                 [-book_scale_x + 0.05, book_scale_y, 0]
             )
             @ mi.ScalarTransform4f.scale(
@@ -191,8 +195,7 @@ def create_book_scene(
         # Page edges on the right side
         "page_edges": {
             "type": "cube",
-            "to_world": book_rotation
-            @ mi.ScalarTransform4f.translate(
+            "to_world": mi.ScalarTransform4f.translate(
                 [book_scale_x - page_strip_width / 2, book_scale_y, 0]
             )
             @ mi.ScalarTransform4f.scale(
@@ -209,8 +212,7 @@ def create_book_scene(
         # Top and bottom page edge highlights
         "page_edges_top": {
             "type": "cube",
-            "to_world": book_rotation
-            @ mi.ScalarTransform4f.translate(
+            "to_world": mi.ScalarTransform4f.translate(
                 [0, height - 0.1, 0]
             )
             @ mi.ScalarTransform4f.scale([book_scale_x * 0.95, 0.1, book_scale_z * 0.9]),
@@ -224,8 +226,7 @@ def create_book_scene(
         },
         "page_edges_bottom": {
             "type": "cube",
-            "to_world": book_rotation
-            @ mi.ScalarTransform4f.translate([0, 0.1, 0])
+            "to_world": mi.ScalarTransform4f.translate([0, 0.1, 0])
             @ mi.ScalarTransform4f.scale([book_scale_x * 0.95, 0.1, book_scale_z * 0.9]),
             "bsdf": {
                 "type": "diffuse",
@@ -238,8 +239,7 @@ def create_book_scene(
         # Optional: Add a subtle title area on the cover (darker rectangle)
         "title_area": {
             "type": "cube",
-            "to_world": book_rotation
-            @ mi.ScalarTransform4f.translate(
+            "to_world": mi.ScalarTransform4f.translate(
                 [width * 0.05, height * 0.55, depth / 2 + 0.05]
             )
             @ mi.ScalarTransform4f.scale([width * 0.35, height * 0.12, 0.1]),
@@ -278,6 +278,7 @@ def create_bookshelf_scene(
     image_height: int = 512,
     sample_count: int = 128,
     zoom: float = 1.0,
+    rotation: float = 0.0,
 ) -> dict:
     """
     Create a Mitsuba scene dictionary for a bookshelf with multiple books.
@@ -298,10 +299,31 @@ def create_bookshelf_scene(
         image_height: Output image height in pixels
         sample_count: Number of samples per pixel for rendering
         zoom: Zoom factor for the camera
+        rotation: Camera rotation around the scene in degrees
 
     Returns:
         A Mitsuba scene dictionary
     """
+    # Calculate camera position with rotation (orbit around the shelf center)
+    # Default camera position: facing the shelf from positive Z
+    base_x = shelf_width * 0.5
+    base_y = 25
+    base_z = shelf_depth * 4.0 * zoom
+
+    # Rotate camera position around the shelf center (shelf_width * 0.5, 0, 0)
+    rotation_rad = np.radians(rotation)
+    cos_rot = np.cos(rotation_rad)
+    sin_rot = np.sin(rotation_rad)
+
+    # Camera position relative to shelf center
+    rel_x = 0  # Centered horizontally
+    rel_z = shelf_depth * 4.0 * zoom
+
+    # Apply rotation
+    camera_x = shelf_width * 0.5 + (rel_x * cos_rot - rel_z * sin_rot)
+    camera_y = base_y
+    camera_z = (rel_x * sin_rot + rel_z * cos_rot)
+
     scene_objects = {
         "type": "scene",
         "integrator": {
@@ -315,7 +337,7 @@ def create_bookshelf_scene(
             "type": "perspective",
             "fov": 50,
             "to_world": mi.ScalarTransform4f.look_at(
-                origin=[shelf_width * 0.5, 25, shelf_depth * 4.0],  # Further back to see all books
+                origin=[camera_x, camera_y, camera_z],
                 target=[shelf_width * 0.5, 12, 0],  # Looking at center of shelf
                 up=[0, 1, 0],
             ),
@@ -585,6 +607,7 @@ def render_bookshelf(
     image_width: int = 1024,
     image_height: int = 512,
     zoom: float = 1.0,
+    rotation: float = 0.0,
 ) -> None:
     """
     Render a bookshelf with multiple books side by side.
@@ -597,6 +620,7 @@ def render_bookshelf(
         image_width: Output image width
         image_height: Output image height
         zoom: Zoom factor for the camera
+        rotation: Camera rotation around the scene in degrees
     """
     print(f"Generating bookshelf with {len(books)} books")
     print(f"Shelf dimensions: {shelf_width:.1f}cm x {shelf_depth:.1f}cm")
@@ -608,6 +632,7 @@ def render_bookshelf(
         image_width=image_width,
         image_height=image_height,
         zoom=zoom,
+        rotation=rotation,
     )
 
     # Load and render the scene
@@ -628,6 +653,7 @@ def generate_random_bookshelf(
     shelf_width: float = 100.0,
     shelf_depth: float = 25.0,
     seed: int = None,
+    rotation: float = 0.0,
 ) -> None:
     """
     Generate a bookshelf with randomly generated books.
@@ -638,6 +664,7 @@ def generate_random_bookshelf(
         shelf_width: Width of the shelf in cm
         shelf_depth: Depth of the shelf in cm
         seed: Random seed for reproducibility
+        rotation: Camera rotation around the scene in degrees
     """
     if seed is not None:
         random.seed(seed)
@@ -716,6 +743,7 @@ def generate_random_bookshelf(
         output_path=output_path,
         shelf_width=shelf_width,
         shelf_depth=shelf_depth,
+        rotation=rotation,
     )
 
 
@@ -914,6 +942,7 @@ def main():
             shelf_width=args.shelf_width,
             shelf_depth=args.shelf_depth,
             seed=args.seed,
+            rotation=args.rotation,
         )
     elif args.num_books == 1 and args.height is not None and args.width is not None and args.depth is not None:
         # Single book with specified dimensions
