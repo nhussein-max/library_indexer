@@ -274,43 +274,60 @@ def create_bookshelf_scene(
     books: list,
     shelf_width: float = 100.0,
     shelf_depth: float = 25.0,
+    shelf_height: float = 100.0,
+    num_shelves: int = 4,
     image_width: int = 1024,
     image_height: int = 512,
     sample_count: int = 128,
     zoom: float = 1.0,
     rotation: float = 0.0,
+    fill_direction: str = "random",
 ) -> dict:
     """
-    Create a Mitsuba scene dictionary for a bookshelf with multiple books.
+    Create a Mitsuba scene dictionary for a full enclosed bookshelf with multiple shelves and books.
 
     Args:
-        books: List of book dictionaries, each containing:
+        books: List of book dictionaries for ALL shelves combined, each containing:
             - height: Book height in cm
             - width: Book width in cm (spine to page edge)
             - depth: Book thickness in cm
             - cover_color: RGB tuple for cover color
             - spine_color: RGB tuple for spine (optional)
             - page_color: RGB tuple for page edges (optional)
-            - rotation: Rotation around Y axis in degrees (optional, default 0)
-            - lean: Lean angle in degrees, positive = leaning right (optional, default 0)
-        shelf_width: Width of the shelf in cm
-        shelf_depth: Depth of the shelf in cm
+            - lean: Lean angle in degrees for tilting (optional, default 0)
+            - shelf_index: Which shelf to place book on (optional)
+        shelf_width: Width of the bookshelf in cm
+        shelf_depth: Depth of the bookshelf in cm
+        shelf_height: Total height of the bookshelf in cm
+        num_shelves: Number of shelves (including bottom)
         image_width: Output image width in pixels
         image_height: Output image height in pixels
         sample_count: Number of samples per pixel for rendering
         zoom: Zoom factor for the camera
         rotation: Camera rotation around the scene in degrees
+        fill_direction: Direction books fill from - "left", "right", "both", or "random"
 
     Returns:
         A Mitsuba scene dictionary
     """
+    # Wood colors for the bookshelf
+    wood_color = [0.4, 0.25, 0.15]  # Main wood color
+    wood_dark = [0.35, 0.22, 0.13]  # Darker wood for back/sides
+    panel_thickness = 2.0  # Thickness of wood panels
+    
+    # Calculate shelf spacing
+    shelf_spacing = shelf_height / num_shelves
+    
+    # Determine fill direction
+    if fill_direction == "random":
+        fill_direction = random.choice(["left", "right", "both"])
+
     # Calculate camera position with rotation (orbit around the shelf center)
     # Default camera position: facing the shelf from positive Z
-    base_x = shelf_width * 0.5
-    base_y = 25
+    base_y = shelf_height * 0.5
     base_z = shelf_depth * 4.0 * zoom
 
-    # Rotate camera position around the shelf center (shelf_width * 0.5, 0, 0)
+    # Rotate camera position around the shelf center
     rotation_rad = np.radians(rotation)
     cos_rot = np.cos(rotation_rad)
     sin_rot = np.sin(rotation_rad)
@@ -331,14 +348,12 @@ def create_bookshelf_scene(
             "max_depth": 8,
         },
         # Camera setup - positioned in FRONT of the shelf looking at the spines
-        # Camera is at positive Z looking toward negative Z (toward the back of the shelf)
-        # Books are arranged along X axis with spines facing +Z (toward camera)
         "sensor": {
             "type": "perspective",
             "fov": 50,
             "to_world": mi.ScalarTransform4f.look_at(
                 origin=[camera_x, camera_y, camera_z],
-                target=[shelf_width * 0.5, 12, 0],  # Looking at center of shelf
+                target=[shelf_width * 0.5, shelf_height * 0.4, 0],
                 up=[0, 1, 0],
             ),
             "sampler": {
@@ -360,7 +375,7 @@ def create_bookshelf_scene(
         # Main directional light from front (toward the spines)
         "emitter_main": {
             "type": "directional",
-            "direction": [0, -0.5, -1.0],  # Light from front going back
+            "direction": [0, -0.5, -1.0],
             "irradiance": {"type": "rgb", "value": [3.0, 2.9, 2.7]},
         },
         # Fill light from above
@@ -369,141 +384,357 @@ def create_bookshelf_scene(
             "direction": [0.3, -1.0, -0.3],
             "irradiance": {"type": "rgb", "value": [1.0, 1.0, 1.0]},
         },
-        # The shelf board
-        "shelf_board": {
-            "type": "cube",
-            "to_world": mi.ScalarTransform4f.translate([shelf_width / 2, -1, 0])
-            @ mi.ScalarTransform4f.scale([shelf_width / 2, 1, shelf_depth / 2]),
-            "bsdf": {
-                "type": "diffuse",
-                "reflectance": {
-                    "type": "rgb",
-                    "value": [0.4, 0.25, 0.15],  # Wood color
-                },
-            },
-        },
-        # Back panel of the bookshelf
+        # === FULL BOOKSHELF STRUCTURE ===
+        # Back panel (full height)
         "shelf_back": {
             "type": "cube",
-            "to_world": mi.ScalarTransform4f.translate([shelf_width / 2, shelf_width * 0.3, -shelf_depth / 2 - 1])
-            @ mi.ScalarTransform4f.scale([shelf_width / 2, shelf_width * 0.3, 1]),
+            "to_world": mi.ScalarTransform4f.translate(
+                [shelf_width / 2, shelf_height / 2, -shelf_depth / 2 - panel_thickness / 2]
+            )
+            @ mi.ScalarTransform4f.scale([shelf_width / 2, shelf_height / 2, panel_thickness / 2]),
             "bsdf": {
                 "type": "diffuse",
-                "reflectance": {
-                    "type": "rgb",
-                    "value": [0.35, 0.22, 0.13],  # Slightly darker wood
-                },
+                "reflectance": {"type": "rgb", "value": wood_dark},
+            },
+        },
+        # Left side panel
+        "shelf_left": {
+            "type": "cube",
+            "to_world": mi.ScalarTransform4f.translate(
+                [-panel_thickness / 2, shelf_height / 2, 0]
+            )
+            @ mi.ScalarTransform4f.scale([panel_thickness / 2, shelf_height / 2, shelf_depth / 2]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {"type": "rgb", "value": wood_color},
+            },
+        },
+        # Right side panel
+        "shelf_right": {
+            "type": "cube",
+            "to_world": mi.ScalarTransform4f.translate(
+                [shelf_width + panel_thickness / 2, shelf_height / 2, 0]
+            )
+            @ mi.ScalarTransform4f.scale([panel_thickness / 2, shelf_height / 2, shelf_depth / 2]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {"type": "rgb", "value": wood_color},
+            },
+        },
+        # Top panel
+        "shelf_top": {
+            "type": "cube",
+            "to_world": mi.ScalarTransform4f.translate(
+                [shelf_width / 2, shelf_height + panel_thickness / 2, 0]
+            )
+            @ mi.ScalarTransform4f.scale([shelf_width / 2 + panel_thickness, panel_thickness / 2, shelf_depth / 2]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {"type": "rgb", "value": wood_color},
+            },
+        },
+        # Bottom panel (base)
+        "shelf_bottom": {
+            "type": "cube",
+            "to_world": mi.ScalarTransform4f.translate(
+                [shelf_width / 2, -panel_thickness / 2, 0]
+            )
+            @ mi.ScalarTransform4f.scale([shelf_width / 2 + panel_thickness, panel_thickness / 2, shelf_depth / 2]),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {"type": "rgb", "value": wood_color},
             },
         },
     }
 
-    # Calculate starting position for books (left side of shelf)
-    current_x = 2.0  # Start with a small margin from the left
-
-    for i, book in enumerate(books):
-        height = book.get("height", 25.0)
-        width = book.get("width", 18.0)  # Spine to page edge (depth into shelf)
-        depth = book.get("depth", 4.0)   # Thickness of the book (along shelf)
-        cover_color = book.get("cover_color", (0.6, 0.1, 0.1))
-        spine_color = book.get("spine_color")
-        page_color = book.get("page_color", (0.95, 0.92, 0.85))
-
-        if spine_color is None:
-            spine_color = tuple(max(0, c * 0.7) for c in cover_color)
-
-        # Book dimensions (no rotation needed - books stand upright with spines facing +Z)
-        # X axis: along the shelf (thickness of book)
-        # Y axis: height of book
-        # Z axis: depth into shelf (spine at +Z, pages at -Z)
-        book_scale_x = depth / 2.0   # Half thickness
-        book_scale_y = height / 2.0  # Half height
-        book_scale_z = width / 2.0   # Half depth (spine to pages)
-
-        # Calculate book position - books side by side along X axis
-        book_x = current_x + book_scale_x
-
-        # Simple upright transform - no rotation, spines face +Z (toward camera)
-        base_transform = mi.ScalarTransform4f.translate([book_x, book_scale_y, 0])
-
-        # Add book objects to scene with unique names
-        prefix = f"book_{i:03d}_"
-
-        # Main book body (the cover)
-        scene_objects[f"{prefix}body"] = {
+    # Add individual shelf boards
+    for shelf_idx in range(num_shelves):
+        shelf_y = shelf_idx * shelf_spacing
+        scene_objects[f"shelf_board_{shelf_idx}"] = {
             "type": "cube",
-            "to_world": base_transform
-            @ mi.ScalarTransform4f.scale([book_scale_x, book_scale_y, book_scale_z]),
+            "to_world": mi.ScalarTransform4f.translate(
+                [shelf_width / 2, shelf_y, 0]
+            )
+            @ mi.ScalarTransform4f.scale([shelf_width / 2, 1, shelf_depth / 2]),
             "bsdf": {
                 "type": "diffuse",
-                "reflectance": {
-                    "type": "rgb",
-                    "value": list(cover_color),
-                },
+                "reflectance": {"type": "rgb", "value": wood_color},
             },
         }
 
-        # Spine - facing +Z toward the camera
-        scene_objects[f"{prefix}spine"] = {
-            "type": "cube",
-            "to_world": base_transform
-            @ mi.ScalarTransform4f.translate([0, 0, book_scale_z + 0.02])
-            @ mi.ScalarTransform4f.scale([book_scale_x * 0.96, book_scale_y * 0.98, 0.1]),
-            "bsdf": {
-                "type": "diffuse",
-                "reflectance": {
-                    "type": "rgb",
-                    "value": list(spine_color),
-                },
-            },
-        }
+    # Group books by shelf
+    books_by_shelf = {}
+    for book in books:
+        shelf_idx = book.get("shelf_index", 0)
+        if shelf_idx not in books_by_shelf:
+            books_by_shelf[shelf_idx] = []
+        books_by_shelf[shelf_idx].append(book)
 
-        # Page edges on the back side (-Z, against the back of shelf)
-        scene_objects[f"{prefix}page_edges"] = {
-            "type": "cube",
-            "to_world": base_transform
-            @ mi.ScalarTransform4f.translate([0, 0, -book_scale_z + 0.2])
-            @ mi.ScalarTransform4f.scale([book_scale_x * 0.9, book_scale_y * 0.96, 0.15]),
-            "bsdf": {
-                "type": "diffuse",
-                "reflectance": {
-                    "type": "rgb",
-                    "value": list(page_color),
-                },
-            },
-        }
+    # Render books on each shelf
+    book_counter = 0
+    for shelf_idx in range(num_shelves):
+        shelf_y = shelf_idx * shelf_spacing
+        shelf_books = books_by_shelf.get(shelf_idx, [])
+        
+        if not shelf_books:
+            continue
 
-        # Top page edge
-        scene_objects[f"{prefix}page_edges_top"] = {
-            "type": "cube",
-            "to_world": base_transform
-            @ mi.ScalarTransform4f.translate([0, book_scale_y - 0.1, 0])
-            @ mi.ScalarTransform4f.scale([book_scale_x * 0.9, 0.1, book_scale_z * 0.9]),
-            "bsdf": {
-                "type": "diffuse",
-                "reflectance": {
-                    "type": "rgb",
-                    "value": list(page_color),
-                },
-            },
-        }
+        # Calculate starting positions based on fill direction
+        current_x = 2.0  # Default starting position
+        if fill_direction == "left":
+            # Fill from left side
+            current_x = 2.0
+        elif fill_direction == "right":
+            # Fill from right side - calculate total width needed including lean space
+            total_depth = 0.0
+            for b in shelf_books:
+                depth = b.get("depth", 4.0)
+                lean = b.get("lean", 0.0)
+                height = b.get("height", 25.0)
+                # Account for both lean directions
+                lean_ext = height * np.sin(np.radians(abs(lean))) if lean != 0 else 0
+                total_depth += depth + 0.2 + lean_ext
+            current_x = shelf_width - total_depth - 2.0
+        else:  # "both"
+            # Split books between left and right sides
+            # Just mark which side they belong to, positions calculated later
+            mid_point = len(shelf_books) // 2
+            for i, book in enumerate(shelf_books):
+                book["_fill_side"] = "left" if i < mid_point else "right"
 
-        # Decorative title band on the spine
-        scene_objects[f"{prefix}title_band"] = {
-            "type": "cube",
-            "to_world": base_transform
-            @ mi.ScalarTransform4f.translate([0, height * 0.1, book_scale_z + 0.06])
-            @ mi.ScalarTransform4f.scale([book_scale_x * 0.7, height * 0.2, 0.08]),
-            "bsdf": {
-                "type": "diffuse",
-                "reflectance": {
-                    "type": "rgb",
-                    "value": [min(1.0, c * 1.2) for c in spine_color],
-                },
-            },
-        }
+        # First pass: determine final lean values based on available support
+        # Check which books have support and adjust leans accordingly
+        for idx, book in enumerate(shelf_books):
+            lean = book.get("lean", 0.0)
+            if lean == 0:
+                continue
+            
+            height = book.get("height", 25.0)
+            
+            # Check support on left side (either side panel or previous book)
+            has_left_support = (idx == 0) or (idx > 0)
+            
+            # Check support on right side (either side panel or next book)
+            has_right_support = (idx == len(shelf_books) - 1) or (idx < len(shelf_books) - 1)
+            
+            # Adjust lean based on available support
+            if lean > 0:  # Top leans left, needs left support
+                if not has_left_support and has_right_support:
+                    book["lean"] = -lean  # Flip to lean right
+                elif not has_left_support and not has_right_support:
+                    book["lean"] = 0.0  # No support
+            else:  # lean < 0, top leans right, needs right support
+                if not has_right_support and has_left_support:
+                    book["lean"] = -lean  # Flip to lean left
+                elif not has_right_support and not has_left_support:
+                    book["lean"] = 0.0  # No support
 
-        # Update current_x for next book - add small gap for realism
-        current_x += depth + 0.2
+        # Second pass: calculate positions based on final leans
+        # Key insight: consecutive books leaning in the same direction support each other
+        book_positions = []
+        
+        if fill_direction == "both":
+            # Handle left side books (placed left to right)
+            left_books = [b for b in shelf_books if b.get("_fill_side") == "left"]
+            right_books = [b for b in shelf_books if b.get("_fill_side") == "right"]
+            
+            left_x = 2.0
+            for idx, book in enumerate(left_books):
+                height = book.get("height", 25.0)
+                depth = book.get("depth", 4.0)
+                lean = book.get("lean", 0.0)
+                
+                x_start = left_x
+                x_end = x_start + depth
+                book_positions.append((book, x_start, x_end))
+                
+                # Calculate gap to next book
+                gap = 0.2
+                if lean < 0:
+                    lean_ext = height * np.sin(np.radians(abs(lean)))
+                    if idx < len(left_books) - 1:
+                        next_book = left_books[idx + 1]
+                        next_lean = next_book.get("lean", 0.0)
+                        if next_lean >= 0:
+                            gap += lean_ext
+                    else:
+                        # Last left-side book
+                        gap += lean_ext
+                
+                left_x = x_end + gap
+            
+            # Handle right side books (placed right to left)
+            right_x = shelf_width - 2.0
+            for idx, book in enumerate(reversed(right_books)):
+                height = book.get("height", 25.0)
+                depth = book.get("depth", 4.0)
+                lean = book.get("lean", 0.0)
+                
+                x_end = right_x
+                x_start = x_end - depth
+                book_positions.append((book, x_start, x_end))
+                
+                # Calculate gap to previous book (in original order, next in reversed)
+                gap = 0.2
+                if lean > 0:
+                    lean_ext = height * np.sin(np.radians(lean))
+                    if idx < len(right_books) - 1:
+                        prev_book = right_books[len(right_books) - 1 - idx - 1]
+                        prev_lean = prev_book.get("lean", 0.0)
+                        if prev_lean <= 0:
+                            gap += lean_ext
+                    else:
+                        gap += lean_ext
+                
+                right_x = x_start - gap
+        else:
+            # Left or right fill - books placed sequentially
+            temp_x = 2.0 if fill_direction == "left" else current_x
+            
+            for idx, book in enumerate(shelf_books):
+                height = book.get("height", 25.0)
+                depth = book.get("depth", 4.0)
+                lean = book.get("lean", 0.0)
+                
+                x_start = temp_x
+                x_end = x_start + depth
+                book_positions.append((book, x_start, x_end))
+                
+                # Calculate gap to next book
+                gap = 0.2
+                
+                if lean < 0:
+                    lean_ext = height * np.sin(np.radians(abs(lean)))
+                    if idx < len(shelf_books) - 1:
+                        next_book = shelf_books[idx + 1]
+                        next_lean = next_book.get("lean", 0.0)
+                        if next_lean >= 0:
+                            gap += lean_ext
+                    else:
+                        if shelf_width - x_end > 5.0:
+                            gap += lean_ext
+                
+                temp_x = x_end + gap
+        
+        # Third pass: render books
+        for book, x_start, x_end in book_positions:
+            height = book.get("height", 25.0)
+            width = book.get("width", 18.0)
+            depth = book.get("depth", 4.0)
+            cover_color = book.get("cover_color", (0.6, 0.1, 0.1))
+            spine_color = book.get("spine_color")
+            page_color = book.get("page_color", (0.95, 0.92, 0.85))
+            lean = book.get("lean", 0.0)
+
+            if spine_color is None:
+                spine_color = tuple(max(0, c * 0.7) for c in cover_color)
+
+            # Book dimensions
+            book_scale_x = depth / 2.0
+            book_scale_y = height / 2.0
+            book_scale_z = width / 2.0
+
+            # Use pre-calculated position
+            book_x = x_start + book_scale_x
+
+            # Ensure book fits on shelf (height constraint)
+            max_book_height = shelf_spacing - 3.0  # Leave some clearance
+            if height > max_book_height:
+                height = max_book_height
+                book_scale_y = height / 2.0
+
+            # Base transform for book position on this shelf
+            base_transform = mi.ScalarTransform4f.translate([book_x, shelf_y + book_scale_y + 1.0, 0])
+
+            # Apply lean/tilt if specified
+            if lean != 0:
+                # Lean around the bottom edge of the book
+                # Pivot point is at the bottom of the book
+                lean_rad = np.radians(lean)
+                # First translate to pivot, rotate, then translate back
+                base_transform = (
+                    mi.ScalarTransform4f.translate([book_x, shelf_y + 1.0, 0])
+                    @ mi.ScalarTransform4f.rotate([0, 0, 1], lean)  # Rotate around Z axis
+                    @ mi.ScalarTransform4f.translate([0, book_scale_y, 0])
+                )
+
+            # Add book objects to scene with unique names
+            prefix = f"book_{book_counter:03d}_"
+            book_counter += 1
+
+            # Main book body (the cover)
+            scene_objects[f"{prefix}body"] = {
+                "type": "cube",
+                "to_world": base_transform
+                @ mi.ScalarTransform4f.scale([book_scale_x, book_scale_y, book_scale_z]),
+                "bsdf": {
+                    "type": "diffuse",
+                    "reflectance": {
+                        "type": "rgb",
+                        "value": list(cover_color),
+                    },
+                },
+            }
+
+            # Spine - facing +Z toward the camera
+            scene_objects[f"{prefix}spine"] = {
+                "type": "cube",
+                "to_world": base_transform
+                @ mi.ScalarTransform4f.translate([0, 0, book_scale_z + 0.02])
+                @ mi.ScalarTransform4f.scale([book_scale_x * 0.96, book_scale_y * 0.98, 0.1]),
+                "bsdf": {
+                    "type": "diffuse",
+                    "reflectance": {
+                        "type": "rgb",
+                        "value": list(spine_color),
+                    },
+                },
+            }
+
+            # Page edges on the back side (-Z, against the back of shelf)
+            scene_objects[f"{prefix}page_edges"] = {
+                "type": "cube",
+                "to_world": base_transform
+                @ mi.ScalarTransform4f.translate([0, 0, -book_scale_z + 0.2])
+                @ mi.ScalarTransform4f.scale([book_scale_x * 0.9, book_scale_y * 0.96, 0.15]),
+                "bsdf": {
+                    "type": "diffuse",
+                    "reflectance": {
+                        "type": "rgb",
+                        "value": list(page_color),
+                    },
+                },
+            }
+
+            # Top page edge
+            scene_objects[f"{prefix}page_edges_top"] = {
+                "type": "cube",
+                "to_world": base_transform
+                @ mi.ScalarTransform4f.translate([0, book_scale_y - 0.1, 0])
+                @ mi.ScalarTransform4f.scale([book_scale_x * 0.9, 0.1, book_scale_z * 0.9]),
+                "bsdf": {
+                    "type": "diffuse",
+                    "reflectance": {
+                        "type": "rgb",
+                        "value": list(page_color),
+                    },
+                },
+            }
+
+            # Decorative title band on the spine
+            scene_objects[f"{prefix}title_band"] = {
+                "type": "cube",
+                "to_world": base_transform
+                @ mi.ScalarTransform4f.translate([0, height * 0.1, book_scale_z + 0.06])
+                @ mi.ScalarTransform4f.scale([book_scale_x * 0.7, height * 0.2, 0.08]),
+                "bsdf": {
+                    "type": "diffuse",
+                    "reflectance": {
+                        "type": "rgb",
+                        "value": [min(1.0, c * 1.2) for c in spine_color],
+                    },
+                },
+            }
 
     return scene_objects
 
@@ -604,35 +835,44 @@ def render_bookshelf(
     output_path: str,
     shelf_width: float = 100.0,
     shelf_depth: float = 25.0,
+    shelf_height: float = 100.0,
+    num_shelves: int = 4,
     image_width: int = 1024,
     image_height: int = 512,
     zoom: float = 1.0,
     rotation: float = 0.0,
+    fill_direction: str = "random",
 ) -> None:
     """
-    Render a bookshelf with multiple books side by side.
+    Render a full enclosed bookshelf with multiple shelves and books.
 
     Args:
         books: List of book dictionaries with book properties
         output_path: Path to save the rendered image
-        shelf_width: Width of the shelf in cm
-        shelf_depth: Depth of the shelf in cm
+        shelf_width: Width of the bookshelf in cm
+        shelf_depth: Depth of the bookshelf in cm
+        shelf_height: Total height of the bookshelf in cm
+        num_shelves: Number of shelves (including bottom)
         image_width: Output image width
         image_height: Output image height
         zoom: Zoom factor for the camera
         rotation: Camera rotation around the scene in degrees
+        fill_direction: Direction books fill from - "left", "right", "both", or "random"
     """
-    print(f"Generating bookshelf with {len(books)} books")
-    print(f"Shelf dimensions: {shelf_width:.1f}cm x {shelf_depth:.1f}cm")
+    print(f"Generating bookshelf with {len(books)} books on {num_shelves} shelves")
+    print(f"Bookshelf dimensions: {shelf_width:.1f}cm x {shelf_depth:.1f}cm x {shelf_height:.1f}cm")
 
     scene_dict = create_bookshelf_scene(
         books=books,
         shelf_width=shelf_width,
         shelf_depth=shelf_depth,
+        shelf_height=shelf_height,
+        num_shelves=num_shelves,
         image_width=image_width,
         image_height=image_height,
         zoom=zoom,
         rotation=rotation,
+        fill_direction=fill_direction,
     )
 
     # Load and render the scene
@@ -652,98 +892,136 @@ def generate_random_bookshelf(
     output_path: str = "bookshelf.png",
     shelf_width: float = 100.0,
     shelf_depth: float = 25.0,
+    shelf_height: float = 100.0,
+    num_shelves: int = 4,
     seed: int = None,
     rotation: float = 0.0,
+    fill_percentage: float = 70.0,
+    fill_direction: str = "random",
+    width_variation: float = 0.0,
+    height_variation: float = 0.0,
+    lean_probability: float = 0.15,
+    lean_angle_range: tuple = (5.0, 15.0),
 ) -> None:
     """
-    Generate a bookshelf with randomly generated books.
+    Generate a full enclosed bookshelf with randomly generated books.
 
     Args:
-        num_books: Number of books to place on the shelf
+        num_books: Approximate number of books to place on the bookshelf
         output_path: Path to save the rendered image
-        shelf_width: Width of the shelf in cm
-        shelf_depth: Depth of the shelf in cm
+        shelf_width: Base width of the bookshelf in cm
+        shelf_depth: Base depth of the bookshelf in cm
+        shelf_height: Base height of the bookshelf in cm
+        num_shelves: Number of shelves (including bottom)
         seed: Random seed for reproducibility
         rotation: Camera rotation around the scene in degrees
+        fill_percentage: Minimum percentage of shelf to fill (0-100)
+        fill_direction: Direction books fill from - "left", "right", "both", or "random"
+        width_variation: Random variation in shelf width (+/- cm)
+        height_variation: Random variation in shelf height (+/- cm)
+        lean_probability: Probability of a book leaning (0.0 to 1.0)
+        lean_angle_range: Range of lean angles in degrees (min, max)
     """
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
 
+    # Apply size variation to bookshelf
+    actual_width = shelf_width + random.uniform(-width_variation, width_variation)
+    actual_height = shelf_height + random.uniform(-height_variation, height_variation)
+
+    # Calculate shelf spacing
+    shelf_spacing = actual_height / num_shelves
+
+    # Determine fill direction
+    actual_fill_direction = fill_direction
+    if fill_direction == "random":
+        actual_fill_direction = random.choice(["left", "right", "both"])
+
+    # Calculate how many books we need based on fill percentage
+    # Average book depth is about 3-4 cm
+    avg_book_depth = 3.5
+    usable_width = actual_width - 4.0  # Account for margins
+    target_fill_width = usable_width * (fill_percentage / 100.0)
+    books_per_shelf_estimate = int(target_fill_width / avg_book_depth)
+
+    # Distribute books across shelves
+    total_books_needed = books_per_shelf_estimate * num_shelves
+    # Adjust num_books if it's significantly different from what fill_percentage implies
+    if num_books < total_books_needed * 0.5:
+        num_books = int(total_books_needed * 0.7)  # Use at least 70% of calculated
+
     books = []
+    books_per_shelf = num_books // num_shelves
+    extra_books = num_books % num_shelves
 
-    # Generate random books
-    for i in range(num_books):
-        # Generate realistic book dimensions
-        height = random.uniform(18.0, 28.0)
-        width = random.uniform(12.0, 22.0)
-        depth = random.uniform(1.5, 6.0)
+    # Color palette for books
+    color_types = ["red", "blue", "green", "brown", "purple", "orange", "teal", "navy", "maroon", "forest"]
 
-        # Generate a pleasant random book cover color
-        hue_type = random.choice(["red", "blue", "green", "brown", "purple", "orange", "teal"])
+    def generate_cover_color():
+        hue_type = random.choice(color_types)
         if hue_type == "red":
-            cover_color = (
-                random.uniform(0.5, 0.8),
-                random.uniform(0.05, 0.15),
-                random.uniform(0.05, 0.15),
-            )
+            return (random.uniform(0.5, 0.8), random.uniform(0.05, 0.15), random.uniform(0.05, 0.15))
         elif hue_type == "blue":
-            cover_color = (
-                random.uniform(0.05, 0.2),
-                random.uniform(0.2, 0.5),
-                random.uniform(0.5, 0.8),
-            )
+            return (random.uniform(0.05, 0.2), random.uniform(0.2, 0.5), random.uniform(0.5, 0.8))
         elif hue_type == "green":
-            cover_color = (
-                random.uniform(0.05, 0.2),
-                random.uniform(0.4, 0.7),
-                random.uniform(0.1, 0.3),
-            )
+            return (random.uniform(0.05, 0.2), random.uniform(0.4, 0.7), random.uniform(0.1, 0.3))
         elif hue_type == "brown":
-            cover_color = (
-                random.uniform(0.4, 0.6),
-                random.uniform(0.25, 0.4),
-                random.uniform(0.1, 0.2),
-            )
+            return (random.uniform(0.4, 0.6), random.uniform(0.25, 0.4), random.uniform(0.1, 0.2))
         elif hue_type == "purple":
-            cover_color = (
-                random.uniform(0.4, 0.7),
-                random.uniform(0.1, 0.25),
-                random.uniform(0.5, 0.8),
-            )
+            return (random.uniform(0.4, 0.7), random.uniform(0.1, 0.25), random.uniform(0.5, 0.8))
         elif hue_type == "orange":
-            cover_color = (
-                random.uniform(0.7, 0.9),
-                random.uniform(0.4, 0.6),
-                random.uniform(0.05, 0.15),
-            )
-        else:  # teal
-            cover_color = (
-                random.uniform(0.05, 0.2),
-                random.uniform(0.5, 0.7),
-                random.uniform(0.5, 0.7),
-            )
+            return (random.uniform(0.7, 0.9), random.uniform(0.4, 0.6), random.uniform(0.05, 0.15))
+        elif hue_type == "teal":
+            return (random.uniform(0.05, 0.2), random.uniform(0.5, 0.7), random.uniform(0.5, 0.7))
+        elif hue_type == "navy":
+            return (random.uniform(0.05, 0.15), random.uniform(0.1, 0.25), random.uniform(0.4, 0.6))
+        elif hue_type == "maroon":
+            return (random.uniform(0.5, 0.7), random.uniform(0.05, 0.15), random.uniform(0.1, 0.25))
+        else:  # forest
+            return (random.uniform(0.05, 0.15), random.uniform(0.3, 0.5), random.uniform(0.1, 0.25))
 
-        # Occasional lean for visual interest (some books lean on neighbors)
-        lean = 0.0
-        if i > 0 and random.random() < 0.15:
-            lean = random.uniform(5.0, 15.0) * random.choice([-1, 1])
+    # Generate books for each shelf
+    for shelf_idx in range(num_shelves):
+        shelf_book_count = books_per_shelf + (1 if shelf_idx < extra_books else 0)
+        max_book_height = shelf_spacing - 4.0  # Leave clearance
 
-        book = {
-            "height": height,
-            "width": width,
-            "depth": depth,
-            "cover_color": cover_color,
-            "lean": lean,
-        }
-        books.append(book)
+        for i in range(shelf_book_count):
+            # Generate realistic book dimensions
+            # Height varies but must fit on shelf
+            height = random.uniform(min(15.0, max_book_height * 0.6), min(max_book_height, 30.0))
+            width = random.uniform(12.0, 22.0)
+            depth = random.uniform(1.5, 6.0)
+
+            cover_color = generate_cover_color()
+
+            # Determine if this book should lean
+            lean = 0.0
+            if i > 0 and random.random() < lean_probability:
+                lean = random.uniform(lean_angle_range[0], lean_angle_range[1]) * random.choice([-1, 1])
+
+            book = {
+                "height": height,
+                "width": width,
+                "depth": depth,
+                "cover_color": cover_color,
+                "lean": lean,
+                "shelf_index": shelf_idx,
+            }
+            books.append(book)
+
+    print(f"Fill direction: {actual_fill_direction}")
+    print(f"Fill percentage target: {fill_percentage}%")
 
     render_bookshelf(
         books=books,
         output_path=output_path,
-        shelf_width=shelf_width,
+        shelf_width=actual_width,
         shelf_depth=shelf_depth,
+        shelf_height=actual_height,
+        num_shelves=num_shelves,
         rotation=rotation,
+        fill_direction=actual_fill_direction,
     )
 
 
@@ -891,7 +1169,7 @@ def main():
     parser.add_argument(
         "--bookshelf",
         action="store_true",
-        help="Generate a bookshelf with multiple books side by side instead of individual books",
+        help="Generate a full enclosed bookshelf with multiple shelves instead of individual books",
     )
     parser.add_argument(
         "--shelf-width",
@@ -904,6 +1182,55 @@ def main():
         type=float,
         default=25.0,
         help="Depth of the bookshelf in cm (default: 25)",
+    )
+    parser.add_argument(
+        "--shelf-height",
+        type=float,
+        default=100.0,
+        help="Height of the bookshelf in cm (default: 100)",
+    )
+    parser.add_argument(
+        "--num-shelves",
+        type=int,
+        default=4,
+        help="Number of shelves in the bookshelf (default: 4)",
+    )
+    parser.add_argument(
+        "--fill-percentage",
+        type=float,
+        default=70.0,
+        help="Minimum percentage of each shelf to fill with books (0-100, default: 70)",
+    )
+    parser.add_argument(
+        "--fill-direction",
+        type=str,
+        choices=["left", "right", "both", "random"],
+        default="random",
+        help="Direction to fill shelves: left, right, both (split), or random (default: random)",
+    )
+    parser.add_argument(
+        "--width-variation",
+        type=float,
+        default=0.0,
+        help="Random variation in bookshelf width (+/- cm, default: 0)",
+    )
+    parser.add_argument(
+        "--height-variation",
+        type=float,
+        default=0.0,
+        help="Random variation in bookshelf height (+/- cm, default: 0)",
+    )
+    parser.add_argument(
+        "--lean-probability",
+        type=float,
+        default=0.15,
+        help="Probability of a book leaning/tilting (0.0-1.0, default: 0.15)",
+    )
+    parser.add_argument(
+        "--lean-angle-range",
+        type=str,
+        default="5,15",
+        help="Range of lean angles as 'min,max' in degrees (default: 5,15)",
     )
 
     args = parser.parse_args()
@@ -931,8 +1258,20 @@ def main():
             print("Error: --rotation-range must be two comma-separated values (e.g., '-30,30')")
             sys.exit(1)
 
+    # Parse lean angle range if provided
+    lean_angle_range = (5.0, 15.0)
+    if args.lean_angle_range:
+        try:
+            parts = args.lean_angle_range.split(",")
+            if len(parts) != 2:
+                raise ValueError
+            lean_angle_range = (float(parts[0]), float(parts[1]))
+        except (ValueError, AttributeError):
+            print("Error: --lean-angle-range must be two comma-separated values (e.g., '5,15')")
+            sys.exit(1)
+
     if args.bookshelf:
-        # Generate bookshelf with multiple books side by side
+        # Generate full enclosed bookshelf with multiple shelves
         if args.seed is not None:
             random.seed(args.seed)
             np.random.seed(args.seed)
@@ -941,8 +1280,16 @@ def main():
             output_path=args.output,
             shelf_width=args.shelf_width,
             shelf_depth=args.shelf_depth,
+            shelf_height=args.shelf_height,
+            num_shelves=args.num_shelves,
             seed=args.seed,
             rotation=args.rotation,
+            fill_percentage=args.fill_percentage,
+            fill_direction=args.fill_direction,
+            width_variation=args.width_variation,
+            height_variation=args.height_variation,
+            lean_probability=args.lean_probability,
+            lean_angle_range=lean_angle_range,
         )
     elif args.num_books == 1 and args.height is not None and args.width is not None and args.depth is not None:
         # Single book with specified dimensions
