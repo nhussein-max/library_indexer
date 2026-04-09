@@ -486,14 +486,34 @@ def create_bookshelf_scene(
             current_x = 2.0
         elif fill_direction == "right":
             # Fill from right side - calculate total width needed including lean space
+            # This needs to match the gap calculation logic in the placement loop
             total_depth = 0.0
-            for b in shelf_books:
+            for idx, b in enumerate(shelf_books):
                 depth = b.get("depth", 4.0)
                 lean = b.get("lean", 0.0)
                 height = b.get("height", 25.0)
-                # Account for both lean directions
-                lean_ext = height * np.sin(np.radians(abs(lean))) if lean != 0 else 0
-                total_depth += depth + 0.2 + lean_ext
+
+                # Base gap and depth
+                total_depth += depth + 0.2
+
+                # If this book leans right, only add gap if next book doesn't also lean right
+                if lean < 0:
+                    if idx < len(shelf_books) - 1:
+                        next_book = shelf_books[idx + 1]
+                        next_lean = next_book.get("lean", 0.0)
+                        if next_lean >= 0:  # Next book doesn't lean right
+                            lean_ext = height * np.sin(np.radians(abs(lean)))
+                            total_depth += lean_ext
+
+                # If next book leans left, only add gap if current book doesn't also lean left
+                if idx < len(shelf_books) - 1:
+                    next_book = shelf_books[idx + 1]
+                    next_lean = next_book.get("lean", 0.0)
+                    if next_lean > 0 and lean <= 0:  # Next leans left, current doesn't
+                        next_height = next_book.get("height", 25.0)
+                        next_lean_ext = next_height * np.sin(np.radians(next_lean))
+                        total_depth += next_lean_ext
+
             current_x = shelf_width - total_depth - 2.0
         else:  # "both"
             # Split books between left and right sides
@@ -502,121 +522,243 @@ def create_bookshelf_scene(
             for i, book in enumerate(shelf_books):
                 book["_fill_side"] = "left" if i < mid_point else "right"
 
-        # First pass: determine final lean values based on available support
-        # Check which books have support and adjust leans accordingly
+        # First pass: normalize lean angles for consecutive same-direction leans
+        # Books leaning in the same direction should have the same angle
+        i = 0
+        while i < len(shelf_books):
+            lean = shelf_books[i].get("lean", 0.0)
+            if lean == 0:
+                i += 1
+                continue
+
+            # Find consecutive books with same lean direction
+            j = i + 1
+            while j < len(shelf_books):
+                next_lean = shelf_books[j].get("lean", 0.0)
+                # Same direction: both positive (lean left) or both negative (lean right)
+                if (lean > 0 and next_lean > 0) or (lean < 0 and next_lean < 0):
+                    j += 1
+                else:
+                    break
+
+            # Normalize all books in this group to the same angle
+            if j > i + 1:
+                # Use the angle of the first book in the group
+                normalized_lean = lean
+                for k in range(i, j):
+                    shelf_books[k]["lean"] = normalized_lean
+
+            i = j
+
+        # Second pass: determine final lean values based on available support
+        # A book needs support in the direction it's leaning
         for idx, book in enumerate(shelf_books):
             lean = book.get("lean", 0.0)
             if lean == 0:
                 continue
-            
-            height = book.get("height", 25.0)
-            
-            # Check support on left side (either side panel or previous book)
-            has_left_support = (idx == 0) or (idx > 0)
-            
-            # Check support on right side (either side panel or next book)
-            has_right_support = (idx == len(shelf_books) - 1) or (idx < len(shelf_books) - 1)
-            
-            # Adjust lean based on available support
-            if lean > 0:  # Top leans left, needs left support
-                if not has_left_support and has_right_support:
-                    book["lean"] = -lean  # Flip to lean right
-                elif not has_left_support and not has_right_support:
-                    book["lean"] = 0.0  # No support
-            else:  # lean < 0, top leans right, needs right support
-                if not has_right_support and has_left_support:
-                    book["lean"] = -lean  # Flip to lean left
-                elif not has_right_support and not has_left_support:
-                    book["lean"] = 0.0  # No support
 
-        # Second pass: calculate positions based on final leans
-        # Key insight: consecutive books leaning in the same direction support each other
+            # Determine if this book has support based on position and fill direction
+            # For left fill: first book is against left wall
+            # For right fill: last book is against right wall
+            # For both fill: need to check _fill_side
+
+            is_first = (idx == 0)
+            is_last = (idx == len(shelf_books) - 1)
+
+            # Check wall support based on fill direction
+            against_left_wall = False
+            against_right_wall = False
+
+            if fill_direction == "left":
+                against_left_wall = is_first
+            elif fill_direction == "right":
+                against_right_wall = is_last
+            else:  # "both"
+                fill_side = book.get("_fill_side", "left")
+                if fill_side == "left":
+                    against_left_wall = is_first
+                else:
+                    against_right_wall = is_last
+
+            # A book can lean left if there's a book to its left OR it's against the left wall
+            # But it must actually REACH the support (touch it)
+            can_lean_left = (idx > 0) or against_left_wall
+            # A book can lean right if there's a book to its right OR it's against the right wall
+            can_lean_right = (idx < len(shelf_books) - 1) or against_right_wall
+
+            # Adjust lean based on available support
+            if lean > 0 and not can_lean_left:  # Top leans left, needs left support
+                if can_lean_right:
+                    book["lean"] = -lean  # Flip to lean right
+                else:
+                    book["lean"] = 0.0  # No support available
+            elif lean < 0 and not can_lean_right:  # Top leans right, needs right support
+                if can_lean_left:
+                    book["lean"] = -lean  # Flip to lean left
+                else:
+                    book["lean"] = 0.0  # No support available
+
+        # Third pass: check shelf boundary clipping and adjust positions/leans
+        panel_thickness = 2.0
+        for idx, book in enumerate(shelf_books):
+            lean = book.get("lean", 0.0)
+            height = book.get("height", 25.0)
+            depth = book.get("depth", 4.0)
+
+            if lean == 0:
+                continue
+
+            lean_ext = height * np.sin(np.radians(abs(lean)))
+
+            # Check if this book would clip into shelf sides
+            # We'll check this during position calculation, but for now
+            # disable leans that would definitely clip
+            is_first = (idx == 0)
+            is_last = (idx == len(shelf_books) - 1)
+
+            if fill_direction == "left":
+                against_left_wall = is_first
+                against_right_wall = False
+            elif fill_direction == "right":
+                against_left_wall = False
+                against_right_wall = is_last
+            else:  # "both"
+                fill_side = book.get("_fill_side", "left")
+                against_left_wall = is_first and fill_side == "left"
+                against_right_wall = is_last and fill_side == "right"
+
+            # If leaning left and against left wall, check if lean extension clips into wall
+            if lean > 0 and against_left_wall:
+                # Book's top would extend left by lean_ext
+                # The wall is at x=0 (with panel at x < panel_thickness)
+                # This is actually fine - the book can lean against the wall
+                pass
+
+            # If leaning right and against right wall, check if lean extension clips into wall
+            if lean < 0 and against_right_wall:
+                # Book's top would extend right by lean_ext
+                # This is fine - the book can lean against the right wall
+                pass
+
+        # Fourth pass: calculate positions based on final leans
+        # Books leaning in the same direction should touch and support each other
+        # Books leaning toward each other need space for the lean
         book_positions = []
-        
+
         if fill_direction == "both":
             # Handle left side books (placed left to right)
             left_books = [b for b in shelf_books if b.get("_fill_side") == "left"]
             right_books = [b for b in shelf_books if b.get("_fill_side") == "right"]
-            
-            left_x = 2.0
+
+            left_x = 2.0  # Start with small margin from left wall
             for idx, book in enumerate(left_books):
                 height = book.get("height", 25.0)
                 depth = book.get("depth", 4.0)
                 lean = book.get("lean", 0.0)
-                
+
                 x_start = left_x
                 x_end = x_start + depth
                 book_positions.append((book, x_start, x_end))
-                
+
                 # Calculate gap to next book
-                gap = 0.2
+                gap = 0.2  # Small base gap
+
+                # If current book leans right, its top extends toward next book
+                # Need extra space unless next book also leans right
                 if lean < 0:
-                    lean_ext = height * np.sin(np.radians(abs(lean)))
                     if idx < len(left_books) - 1:
                         next_book = left_books[idx + 1]
                         next_lean = next_book.get("lean", 0.0)
-                        if next_lean >= 0:
+                        if next_lean >= 0:  # Next book doesn't lean right
+                            lean_ext = height * np.sin(np.radians(abs(lean)))
                             gap += lean_ext
-                    else:
-                        # Last left-side book
-                        gap += lean_ext
-                
+
+                # If next book leans left, its top will extend toward current book
+                # Need extra space unless current book also leans left
+                if idx < len(left_books) - 1:
+                    next_book = left_books[idx + 1]
+                    next_lean = next_book.get("lean", 0.0)
+                    if next_lean > 0 and lean <= 0:  # Next leans left, current doesn't
+                        next_height = next_book.get("height", 25.0)
+                        next_lean_ext = next_height * np.sin(np.radians(next_lean))
+                        gap += next_lean_ext
+
                 left_x = x_end + gap
-            
+
             # Handle right side books (placed right to left)
-            right_x = shelf_width - 2.0
+            right_x = shelf_width - 2.0  # Start with small margin from right wall
             for idx, book in enumerate(reversed(right_books)):
                 height = book.get("height", 25.0)
                 depth = book.get("depth", 4.0)
                 lean = book.get("lean", 0.0)
-                
+
                 x_end = right_x
                 x_start = x_end - depth
                 book_positions.append((book, x_start, x_end))
-                
+
                 # Calculate gap to previous book (in original order, next in reversed)
                 gap = 0.2
+
+                # If current book leans left, its top extends toward the left
+                # Need extra space unless next book (to the left) also leans left
                 if lean > 0:
-                    lean_ext = height * np.sin(np.radians(lean))
                     if idx < len(right_books) - 1:
                         prev_book = right_books[len(right_books) - 1 - idx - 1]
                         prev_lean = prev_book.get("lean", 0.0)
-                        if prev_lean <= 0:
+                        if prev_lean <= 0:  # Next book doesn't lean left
+                            lean_ext = height * np.sin(np.radians(lean))
                             gap += lean_ext
-                    else:
-                        gap += lean_ext
-                
+
+                # If next book (to the left) leans right, its top extends toward current book
+                # Need extra space unless current book also leans right
+                if idx < len(right_books) - 1:
+                    prev_book = right_books[len(right_books) - 1 - idx - 1]
+                    prev_lean = prev_book.get("lean", 0.0)
+                    if prev_lean < 0 and lean >= 0:  # Next leans right, current doesn't
+                        prev_height = prev_book.get("height", 25.0)
+                        prev_lean_ext = prev_height * np.sin(np.radians(abs(prev_lean)))
+                        gap += prev_lean_ext
+
                 right_x = x_start - gap
         else:
             # Left or right fill - books placed sequentially
             temp_x = 2.0 if fill_direction == "left" else current_x
-            
+
             for idx, book in enumerate(shelf_books):
                 height = book.get("height", 25.0)
                 depth = book.get("depth", 4.0)
                 lean = book.get("lean", 0.0)
-                
+
                 x_start = temp_x
                 x_end = x_start + depth
                 book_positions.append((book, x_start, x_end))
-                
+
                 # Calculate gap to next book
                 gap = 0.2
-                
+
+                # If current book leans right, its top extends toward next book
+                # Need extra space unless next book also leans right
                 if lean < 0:
-                    lean_ext = height * np.sin(np.radians(abs(lean)))
                     if idx < len(shelf_books) - 1:
                         next_book = shelf_books[idx + 1]
                         next_lean = next_book.get("lean", 0.0)
-                        if next_lean >= 0:
+                        if next_lean >= 0:  # Next book doesn't lean right
+                            lean_ext = height * np.sin(np.radians(abs(lean)))
                             gap += lean_ext
-                    else:
-                        if shelf_width - x_end > 5.0:
-                            gap += lean_ext
-                
+
+                # If next book leans left, its top will extend toward current book
+                # Need extra space unless current book also leans left
+                if idx < len(shelf_books) - 1:
+                    next_book = shelf_books[idx + 1]
+                    next_lean = next_book.get("lean", 0.0)
+                    if next_lean > 0 and lean <= 0:  # Next leans left, current doesn't
+                        next_height = next_book.get("height", 25.0)
+                        next_lean_ext = next_height * np.sin(np.radians(next_lean))
+                        gap += next_lean_ext
+
                 temp_x = x_end + gap
-        
-        # Third pass: render books
+
+        # Fifth pass: render books
         for book, x_start, x_end in book_positions:
             height = book.get("height", 25.0)
             width = book.get("width", 18.0)
@@ -925,6 +1067,13 @@ def generate_random_bookshelf(
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
+    else:
+        # Generate a random seed for reproducibility
+        seed = random.randint(0, 2**31 - 1)
+        random.seed(seed)
+        np.random.seed(seed)
+
+    print(f"Seed: {seed}")
 
     # Apply size variation to bookshelf
     actual_width = shelf_width + random.uniform(-width_variation, width_variation)
@@ -1031,6 +1180,7 @@ def generate_random_books(
     rotation: float = None,
     zoom: float = 1.0,
     rotation_range: tuple = (-45.0, 45.0),
+    seed: int = None,
 ) -> None:
     """
     Generate multiple books with random dimensions and colors.
@@ -1043,7 +1193,19 @@ def generate_random_books(
         zoom: Zoom factor for the camera.
         rotation_range: Tuple of (min, max) degrees for random rotation when
                         rotation is not specified.
+        seed: Random seed for reproducibility
     """
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+    else:
+        # Generate a random seed for reproducibility
+        seed = random.randint(0, 2**31 - 1)
+        random.seed(seed)
+        np.random.seed(seed)
+
+    print(f"Seed: {seed}")
+
     os.makedirs(output_dir, exist_ok=True)
 
     for i in range(num_books):
@@ -1331,6 +1493,7 @@ def main():
             rotation=args.rotation if args.rotation != 0.0 else None,
             zoom=args.zoom,
             rotation_range=rotation_range,
+            seed=args.seed,
         )
 
 
